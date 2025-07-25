@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "../../firebase";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
-import { getDatabase, ref, get, child, set, remove } from "firebase/database";
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, uploadBytesResumable, deleteObject } from "firebase/storage";
+import { getDatabase, ref, get, child, remove } from "firebase/database";
+import { getStorage, ref as storageRef, deleteObject } from "firebase/storage";
 import AddPhoto from "./AddPhoto";
 import RemovePhoto from "./RemovePhoto";
 
@@ -14,9 +14,7 @@ export default function Settings() {
   const [photos, setPhotos] = useState<
     { id: string; file_name: string; label: string; location: string }[]
   >([]);
-  const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [pendingPhoto, setPendingPhoto] = useState<string | null>(null); // file name being uploaded
+
   const router = useRouter();
 
   useEffect(() => {
@@ -35,9 +33,6 @@ export default function Settings() {
         try {
           const db = getDatabase();
           const dbRef = ref(db);
-          const rootSnapshot = await get(dbRef);
-          // List all top-level folders/keys in the database root (no log)
-
           // Fetch photos from data/photos
           const photosSnapshot = await get(child(dbRef, "data/photos"));
           if (photosSnapshot.exists()) {
@@ -67,66 +62,6 @@ export default function Settings() {
   const handleSignOut = async () => {
     await signOut(auth);
     router.replace("/signin");
-  };
-
-  // Photo upload handler
-  const handlePhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    setUploading(true);
-    setUploadProgress(0);
-    setPendingPhoto(file.name);
-
-    try {
-      // 1. Upload to Firebase Storage with progress
-      const storage = getStorage();
-      const fileRef = storageRef(storage, `photo-gallery/${file.name}`);
-      const uploadTask = uploadBytesResumable(fileRef, file);
-
-      uploadTask.on(
-        "state_changed",
-        (snapshot) => {
-          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
-          setUploadProgress(progress);
-        },
-        (error) => {
-          setUploading(false);
-          setUploadProgress(null);
-          setPendingPhoto(null);
-          alert("Failed to upload photo.");
-        },
-        async () => {
-          // 2. Get download URL
-          const url = await getDownloadURL(fileRef);
-
-          // 3. Add entry to Realtime Database
-          const db = getDatabase();
-          const photosDbRef = ref(db, "data/photos");
-          const newPhotoRef = child(photosDbRef, file.name.replace(/\./g, "_"));
-
-          await set(newPhotoRef, {
-            file_name: file.name,
-            label: "",
-            location: url,
-          });
-
-          // 4. Optionally refresh photo list
-          setPhotos((prev) => [
-            ...prev,
-            { id: file.name.replace(/\./g, "_"), file_name: file.name, label: "", location: url },
-          ]);
-          setUploading(false);
-          setUploadProgress(null);
-          setPendingPhoto(null);
-        }
-      );
-    } catch (error) {
-      setUploading(false);
-      setUploadProgress(null);
-      setPendingPhoto(null);
-      alert("Failed to upload photo.");
-    }
   };
 
   // Delete photo handler
