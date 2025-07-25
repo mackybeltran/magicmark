@@ -4,9 +4,19 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "../../firebase";
 import { onAuthStateChanged, signOut, User } from "firebase/auth";
+import { getDatabase, ref, get, child, set, remove } from "firebase/database";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, uploadBytesResumable, deleteObject } from "firebase/storage";
+import AddPhoto from "./AddPhoto";
+import RemovePhoto from "./RemovePhoto";
 
 export default function Settings() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
+  const [photos, setPhotos] = useState<
+    { id: string; file_name: string; label: string; location: string }[]
+  >([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [pendingPhoto, setPendingPhoto] = useState<string | null>(null); // file name being uploaded
   const router = useRouter();
 
   useEffect(() => {
@@ -19,6 +29,36 @@ export default function Settings() {
     return () => unsubscribe();
   }, [router]);
 
+  useEffect(() => {
+    if (user) {
+      const fetchPhotos = async () => {
+        try {
+          const db = getDatabase();
+          const dbRef = ref(db);
+          const rootSnapshot = await get(dbRef);
+          // List all top-level folders/keys in the database root (no log)
+
+          // Fetch photos from data/photos
+          const photosSnapshot = await get(child(dbRef, "data/photos"));
+          if (photosSnapshot.exists()) {
+            const data = photosSnapshot.val();
+            // Convert object to array with id
+            const photoList = Object.entries(data).map(([id, value]) => ({
+              id,
+              ...(value as { file_name: string; label: string; location: string }),
+            }));
+            setPhotos(photoList);
+          } else {
+            setPhotos([]);
+          }
+        } catch (error) {
+          // Optionally handle error
+        }
+      };
+      fetchPhotos();
+    }
+  }, [user]);
+
   if (user === undefined) {
     // Still loading auth state
     return null;
@@ -29,11 +69,120 @@ export default function Settings() {
     router.replace("/signin");
   };
 
+  // Photo upload handler
+  const handlePhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploading(true);
+    setUploadProgress(0);
+    setPendingPhoto(file.name);
+
+    try {
+      // 1. Upload to Firebase Storage with progress
+      const storage = getStorage();
+      const fileRef = storageRef(storage, `photo-gallery/${file.name}`);
+      const uploadTask = uploadBytesResumable(fileRef, file);
+
+      uploadTask.on(
+        "state_changed",
+        (snapshot) => {
+          const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+          setUploadProgress(progress);
+        },
+        (error) => {
+          setUploading(false);
+          setUploadProgress(null);
+          setPendingPhoto(null);
+          alert("Failed to upload photo.");
+        },
+        async () => {
+          // 2. Get download URL
+          const url = await getDownloadURL(fileRef);
+
+          // 3. Add entry to Realtime Database
+          const db = getDatabase();
+          const photosDbRef = ref(db, "data/photos");
+          const newPhotoRef = child(photosDbRef, file.name.replace(/\./g, "_"));
+
+          await set(newPhotoRef, {
+            file_name: file.name,
+            label: "",
+            location: url,
+          });
+
+          // 4. Optionally refresh photo list
+          setPhotos((prev) => [
+            ...prev,
+            { id: file.name.replace(/\./g, "_"), file_name: file.name, label: "", location: url },
+          ]);
+          setUploading(false);
+          setUploadProgress(null);
+          setPendingPhoto(null);
+        }
+      );
+    } catch (error) {
+      setUploading(false);
+      setUploadProgress(null);
+      setPendingPhoto(null);
+      alert("Failed to upload photo.");
+    }
+  };
+
+  // Delete photo handler
+  const handleDeletePhoto = async (photo: { id: string; file_name: string; location: string }) => {
+    if (!window.confirm("Are you sure you want to delete this photo?")) return;
+    try {
+      // 1. Delete from Storage
+      const storage = getStorage();
+      const fileRef = storageRef(storage, `photo-gallery/${photo.file_name}`);
+      await deleteObject(fileRef);
+
+      // 2. Delete from Database
+      const db = getDatabase();
+      const photoDbRef = ref(db, `data/photos/${photo.id}`);
+      await remove(photoDbRef);
+
+      // 3. Remove from local state
+      setPhotos((prev) => prev.filter((p) => p.id !== photo.id));
+    } catch (error) {
+      alert("Failed to delete photo.");
+    }
+  };
+
   return (
-    <main>
-      <h1>Settings</h1>
-      <p>Settings page content goes here.</p>
-      <button onClick={handleSignOut}>Sign Out</button>
+    <main className="p-6">
+      <h1 className="text-2xl font-bold mb-2">Settings</h1>
+      <p className="mb-4 text-gray-600">Settings page content goes here.</p>
+      <button
+        onClick={handleSignOut}
+        className="mb-6 px-4 py-2 bg-red-500 text-white rounded hover:bg-red-600 transition"
+      >
+        Sign Out
+      </button>
+      <section>
+        <h2 className="text-xl font-semibold mb-4">Your Photos</h2>
+        <div className="flex flex-wrap gap-4">
+          {/* Add Photo Feature */}
+          <AddPhoto
+            onPhotoAdded={(photo) =>
+              setPhotos((prev) => [...prev, photo])
+            }
+          />
+          {/* Photo Thumbnails */}
+          {photos.map((photo) => (
+            <div key={photo.id} className="flex flex-col items-center w-24 relative">
+              <RemovePhoto onClick={() => handleDeletePhoto(photo)} />
+              <img
+                src={photo.location}
+                alt={photo.label}
+                className="w-20 h-20 object-cover rounded mb-2 border border-gray-200 shadow"
+              />
+              <div className="text-xs text-center text-gray-700 truncate w-full">{photo.label}</div>
+            </div>
+          ))}
+        </div>
+      </section>
     </main>
   );
-} 
+}
